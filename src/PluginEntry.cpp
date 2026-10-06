@@ -22,7 +22,7 @@
 #include <cstring>
 
 #define PLUGIN_NAME    "CSV Lint"
-#define PLUGIN_VERSION "1.0.0"
+#define PLUGIN_VERSION "1.0.1"
 static const int NB_FUNC = 11;
 
 static NppData  nppData;
@@ -62,7 +62,16 @@ static void toggleLintWindow() {
         intptr_t h = npp(NPPM_DMM_REGISTERPANEL,
                          (uintptr_t)"CSV Lint",
                          (intptr_t)sPanelView);
-        if (h > 0) g_panelHandle = h;
+        if (h > 0) {
+            g_panelHandle = h;
+            // Declare the reopen command so the host restores the panel after
+            // a restart (GH linux#18): module = getName() ("CSV Lint"),
+            // cmdIndex 0 = "CSV Lint window". Hosts < 1.1.0 return 0 — ignored.
+            NppPanelInfo info;
+            info.moduleName = PLUGIN_NAME;
+            info.cmdIndex   = 0;
+            npp(NPPM_DMM_SETPANELINFO, (uintptr_t)g_panelHandle, (intptr_t)&info);
+        }
     }
     if (g_panelHandle == 0) {
         csvAlert(PLUGIN_NAME, "The host rejected the panel registration.");
