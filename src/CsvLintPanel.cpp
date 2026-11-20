@@ -127,13 +127,54 @@ static int rgbToSci(int rrggbb) {   // Scintilla colours are 0xBBGGRR
     return ((rrggbb & 0xFF) << 16) | (rrggbb & 0xFF00) | ((rrggbb >> 16) & 0xFF);
 }
 
+// ── indicator layout (port of macOS 9b73b6d, Linux probe per D2) ───────────
+// Legacy hosts leave 20..31 free enough that the shipped 12-indicator
+// spread works; keep it there for continuity. Hosts with the remapped
+// Windows-parity layout own 21-26 and 28-31 (mark styles, git diff,
+// inc-search, smart highlight, spell, find mark), so there we multiplex
+// all 12 column tints onto ONE allocated indicator using
+// SC_INDICFLAG_VALUEFORE: the fill *value* carries the color
+// (| SC_INDICVALUEBIT), the box style/alpha are shared — visually
+// identical. Layout probe: macOS asks NPPM_GETBOOKMARKID (20 on new,
+// 24 on old) — unusable on Linux where every host answers 20, so we
+// read the git-gutter margin mask instead: SCI_GETMARGINMASKN(3) is
+// markers 2/3/4 (0x1C) on the shipped layout and 15/16/17 (0x38000)
+// after the remap (nextpad-plus-plus-gtk4 npp_scintilla_ids.h, D2).
+static bool sRemapResolved = false;
+static bool sRemapped      = false;
+static int  sMuxIndicator  = -1;           // single VALUEFORE slot when remapped
+static int  sSciColors[12] = {0};          // active palette, Scintilla BGR
+
+static void resolveIndicatorLayout() {
+    if (sRemapResolved) return;
+    sRemapResolved = true;
+    intptr_t ggMask = sci(SCI_GETMARGINMASKN, 3);
+    sRemapped = (ggMask & 0x38000) != 0;   // git gutter on markers 15/16/17
+    if (!sRemapped) return;
+    int id = -1;
+    if (npp(NPPM_ALLOCATEINDICATOR, 1, (intptr_t)&id) && id > 0)
+        sMuxIndicator = id;
+    else
+        sMuxIndicator = 27;   // pool exhausted: 27 is unowned in the new layout
+}
+
 static void setupIndicators() {
+    resolveIndicatorLayout();
     bool dark = npp(NPPM_ISDARKMODEENABLED) != 0;
     const int *palette = dark ? kDarkColors : kLightColors;
+    for (int i = 0; i < 12; i++) sSciColors[i] = rgbToSci(palette[i]);
+    if (sRemapped) {
+        sci(SCI_INDICSETSTYLE, sMuxIndicator, INDIC_FULLBOX);
+        sci(SCI_INDICSETFLAGS, sMuxIndicator, SC_INDICFLAG_VALUEFORE);
+        sci(SCI_INDICSETALPHA, sMuxIndicator, dark ? 70 : 130);
+        sci(SCI_INDICSETOUTLINEALPHA, sMuxIndicator, 0);
+        sci(SCI_INDICSETUNDER, sMuxIndicator, 1);
+        return;
+    }
     for (int i = 0; i < 12; i++) {
         int ind = kIndicatorBase + i;
         sci(SCI_INDICSETSTYLE, ind, INDIC_FULLBOX);
-        sci(SCI_INDICSETFORE, ind, rgbToSci(palette[i]));
+        sci(SCI_INDICSETFORE, ind, sSciColors[i]);
         sci(SCI_INDICSETALPHA, ind, dark ? 70 : 130);
         sci(SCI_INDICSETOUTLINEALPHA, ind, 0);
         sci(SCI_INDICSETUNDER, ind, 1);
@@ -141,7 +182,13 @@ static void setupIndicators() {
 }
 
 static void clearColors() {
+    resolveIndicatorLayout();
     intptr_t len = sci(SCI_GETLENGTH);
+    if (sRemapped) {
+        sci(SCI_SETINDICATORCURRENT, sMuxIndicator);
+        sci(SCI_INDICATORCLEARRANGE, 0, len);
+        return;
+    }
     for (int i = 0; i < 12; i++) {
         sci(SCI_SETINDICATORCURRENT, kIndicatorBase + i);
         sci(SCI_INDICATORCLEARRANGE, 0, len);
@@ -172,7 +219,13 @@ static void applyColumnColors() {
 
     auto fill = [&](size_t start, size_t end, int col) {
         if (end <= start) return;
-        sci(SCI_SETINDICATORCURRENT, kIndicatorBase + (col % 12));
+        if (sRemapped) {
+            sci(SCI_SETINDICATORCURRENT, sMuxIndicator);
+            sci(SCI_SETINDICATORVALUE,
+                (uintptr_t)(sSciColors[col % 12] | SC_INDICVALUEBIT));
+        } else {
+            sci(SCI_SETINDICATORCURRENT, kIndicatorBase + (col % 12));
+        }
         sci(SCI_INDICATORFILLRANGE, start, end - start);
     };
 
